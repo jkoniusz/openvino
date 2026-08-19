@@ -1,0 +1,195 @@
+name: NPU CiP Bump Notification
+
+# Notifies a fixed set of people whenever the prebuilt NPU compiler-in-package (CiP)
+# binaries are bumped on master or a release branch. A bump is detected by a value-level
+# change of the version / commit sha / SHA256 checksum variables in:
+#     src/plugins/intel_npu/cmake/download_compiler_libs.cmake
+#
+# Delivery is GitHub-native (Option B): the workflow adds a comment to a long-lived
+# tracking issue and @mentions the recipients, so GitHub emails them from
+# notifications@github.com. No SMTP relay, no third-party actions, no extra secrets.
+#
+# Configuration (repository -> Settings -> Secrets and variables -> Actions -> Variables):
+#     NPU_CIP_TRACKING_ISSUE  - number of the tracking issue to comment on (e.g. 12345)
+#     NPU_CIP_NOTIFY_LOGINS   - space/comma separated GitHub logins to @mention
+# Both are optional: if unset, the workflow logs the detected change to the run summary
+# and no-ops on delivery, so it is safe to merge before the issue/recipients exist.
+
+on:
+  push:
+    branches:
+      - master
+      - 'releases/**'
+    paths:
+      - 'src/plugins/intel_npu/cmake/download_compiler_libs.cmake'
+  # TEMPORARY (fork testing only): remove this whole pull_request block before
+  # opening the PR to openvinotoolkit. Lets you exercise the workflow by opening a
+  # PR in your fork that edits the cmake file; it then comments on the PR itself.
+  pull_request:
+    paths:
+      - 'src/plugins/intel_npu/cmake/download_compiler_libs.cmake'
+      - '.github/workflows/npu_cip_bump_notification.yml'
+  workflow_dispatch:
+    inputs:
+      before_sha:
+        description: 'Base commit SHA (old revision) for dry-run comparison'
+        required: true
+      after_sha:
+        description: 'Head commit SHA (new revision) for dry-run comparison'
+        required: true
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  notify-npu-cip-bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write  # TEMPORARY (fork testing): needed to comment on the PR
+    env:
+      FILE_PATH: src/plugins/intel_npu/cmake/download_compiler_libs.cmake
+      # Variables tracked for a value-level bump comparison.
+      TRACKED_VARS: >-
+        PLUGIN_COMPILER_VERSION_MAJOR
+        PLUGIN_COMPILER_VERSION_MINOR
+        PLUGIN_COMPILER_VERSION_PATCH
+        PLUGIN_COMPILER_COMMIT_SHA
+        PLUGIN_COMPILER_WINDOWS_2022_CHECKSUM
+        PLUGIN_COMPILER_UBUNTU_22_04_CHECKSUM
+        PLUGIN_COMPILER_UBUNTU_24_04_CHECKSUM
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Detect CiP value-level change
+        id: detect
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BEFORE="${{ github.event.inputs.before_sha }}"
+            AFTER="${{ github.event.inputs.after_sha }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # TEMPORARY (fork testing): compare the PR's base and head.
+            BEFORE="${{ github.event.pull_request.base.sha }}"
+            AFTER="${{ github.event.pull_request.head.sha }}"
+          else
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.sha }}"
+          fi
+          echo "Comparing ${FILE_PATH} between ${BEFORE} and ${AFTER}"
+
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          if [[ -z "${BEFORE}" || "${BEFORE}" == "${ZERO_SHA}" ]]; then
+            echo "No usable base revision (branch creation or force-push); skipping." | tee -a "${GITHUB_STEP_SUMMARY}"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          fetch_file() {
+            # Fetch the raw file at a given ref without checking out the (huge) repo.
+            gh api "repos/${GITHUB_REPOSITORY}/contents/${FILE_PATH}?ref=$1" --jq '.content' | base64 -d
+          }
+          get_val() {
+            # $1 = file, $2 = variable name -> prints the value inside set(NAME value)
+            grep -oE "set\\($2[[:space:]]+[^)]*\\)" "$1" | head -n1 \
+              | sed -E "s/^set\\($2[[:space:]]+//; s/\\)$//" | tr -d '[:space:]'
+          }
+
+          fetch_file "${BEFORE}" > before.cmake
+          fetch_file "${AFTER}" > after.cmake
+
+          CHANGED=false
+          ANOMALY=false
+          PARSED_ANY_AFTER=false
+          ROWS=""
+          for v in ${TRACKED_VARS}; do
+            old="$(get_val before.cmake "${v}")"
+            new="$(get_val after.cmake "${v}")"
+            [[ -n "${new}" ]] && PARSED_ANY_AFTER=true
+            if [[ "${old}" != "${new}" ]]; then
+              CHANGED=true
+              ROWS+="| \`${v}\` | \`${old:-<none>}\` | \`${new:-<none>}\` |"$'\n'
+            fi
+          done
+
+          # If the file changed but none of the tracked variables can be parsed in the
+          # new revision, the variables were likely renamed. Notify anyway rather than
+          # staying silent (fail-loud on schema drift).
+          if [[ "${PARSED_ANY_AFTER}" == "false" ]]; then
+            ANOMALY=true
+            CHANGED=true
+          fi
+
+          echo "changed=${CHANGED}" >> "${GITHUB_OUTPUT}"
+          if [[ "${CHANGED}" != "true" ]]; then
+            echo "No value-level change in tracked NPU CiP variables; skipping notification." \
+              | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          NOW="$(TZ='Europe/Warsaw' date +'%H:%M %d/%m/%Y %Z')"
+          COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${AFTER}"
+          BRANCH="${{ github.ref_name }}"
+          AUTHOR="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${AFTER}" --jq '.commit.author.name' 2>/dev/null || true)"
+          PR_INFO="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${AFTER}/pulls" \
+            --jq '.[0] | "#\(.number) \(.title)"' 2>/dev/null || true)"
+
+          MENTIONS=""
+          for l in $(echo "${NPU_CIP_NOTIFY_LOGINS:-}" | tr ',' ' '); do
+            [[ -n "${l}" ]] && MENTIONS+="@${l} "
+          done
+
+          {
+            echo "### 🔔 NPU CiP bump detected"
+            echo ""
+            [[ -n "${MENTIONS}" ]] && echo "${MENTIONS}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Date | ${NOW} |"
+            echo "| Branch | \`${BRANCH}\` |"
+            echo "| Commit | ${COMMIT_URL} |"
+            [[ -n "${AUTHOR}" ]] && echo "| Author | ${AUTHOR} |"
+            [[ -n "${PR_INFO}" ]] && echo "| Pull request | ${PR_INFO} |"
+            echo ""
+            if [[ "${ANOMALY}" == "true" ]]; then
+              echo "> ⚠️ The tracked \`PLUGIN_COMPILER_*\` variables could not be parsed in the new"
+              echo "> revision. They may have been renamed — please verify this notification manually."
+              echo ""
+            fi
+            if [[ -n "${ROWS}" ]]; then
+              echo "| Variable | Old | New |"
+              echo "| --- | --- | --- |"
+              printf '%s' "${ROWS}"
+            fi
+          } > body.md
+
+          echo "Detected change body:"
+          cat body.md >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          NPU_CIP_NOTIFY_LOGINS: ${{ vars.NPU_CIP_NOTIFY_LOGINS }}
+
+      - name: Post notification to tracking issue
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          TRACKING_ISSUE: ${{ vars.NPU_CIP_TRACKING_ISSUE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # TEMPORARY (fork testing): on a pull_request, comment on the PR itself
+          # so testing needs no tracking issue and no configured variables.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body-file body.md
+            echo "Posted NPU CiP bump notification to PR #${PR_NUMBER}."
+            exit 0
+          fi
+          if [[ -z "${TRACKING_ISSUE}" ]]; then
+            echo "::warning::NPU_CIP_TRACKING_ISSUE variable is not set; change detected but no comment posted."
+            exit 0
+          fi
+          gh issue comment "${TRACKING_ISSUE}" --repo "${GITHUB_REPOSITORY}" --body-file body.md
+          echo "Posted NPU CiP bump notification to issue #${TRACKING_ISSUE}."
