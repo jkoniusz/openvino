@@ -8,11 +8,15 @@ name: NPU CiP Bump Notification
 # Delivery is GitHub-native (Option B): the workflow adds a comment to a long-lived
 # tracking issue and @mentions the recipients, so GitHub emails them from
 # notifications@github.com. No SMTP relay, no third-party actions, no extra secrets.
+# Optionally it also posts an Adaptive Card to a Microsoft Teams channel.
 #
-# Configuration (repository -> Settings -> Secrets and variables -> Actions -> Variables):
+# Configuration (repository -> Settings -> Secrets and variables -> Actions):
+#   Variables:
 #     NPU_CIP_TRACKING_ISSUE  - number of the tracking issue to comment on (e.g. 12345)
 #     NPU_CIP_NOTIFY_LOGINS   - space/comma separated GitHub logins to @mention
-# Both are optional: if unset, the workflow logs the detected change to the run summary
+#   Secrets:
+#     NPU_CIP_TEAMS_WEBHOOK_URL - Teams incoming webhook URL of the destination channel
+# All are optional: if unset, the workflow logs the detected change to the run summary
 # and no-ops on delivery, so it is safe to merge before the issue/recipients exist.
 
 on:
@@ -106,6 +110,7 @@ jobs:
           ANOMALY=false
           PARSED_ANY_AFTER=false
           ROWS=""
+          CHANGES_TEXT=""
           for v in ${TRACKED_VARS}; do
             old="$(get_val before.cmake "${v}")"
             new="$(get_val after.cmake "${v}")"
@@ -113,6 +118,7 @@ jobs:
             if [[ "${old}" != "${new}" ]]; then
               CHANGED=true
               ROWS+="| \`${v}\` | \`${old:-<none>}\` | \`${new:-<none>}\` |"$'\n'
+              CHANGES_TEXT+="- ${v}: ${old:-<none>} -> ${new:-<none>}"$'\n'
             fi
           done
 
@@ -170,6 +176,19 @@ jobs:
 
           echo "Detected change body:"
           cat body.md >> "${GITHUB_STEP_SUMMARY}"
+
+          # Expose fields for downstream notification steps (Teams).
+          {
+            echo "date=${NOW}"
+            echo "branch=${BRANCH}"
+            echo "commit_url=${COMMIT_URL}"
+            echo "author=${AUTHOR}"
+            echo "pr_info=${PR_INFO}"
+            echo "changes<<CHANGES_EOF"
+            printf '%s' "${CHANGES_TEXT:-<variables could not be parsed>}"
+            echo ""
+            echo "CHANGES_EOF"
+          } >> "${GITHUB_OUTPUT}"
         env:
           NPU_CIP_NOTIFY_LOGINS: ${{ vars.NPU_CIP_NOTIFY_LOGINS }}
 
@@ -193,3 +212,27 @@ jobs:
           fi
           gh issue comment "${TRACKING_ISSUE}" --repo "${GITHUB_REPOSITORY}" --body-file body.md
           echo "Posted NPU CiP bump notification to issue #${TRACKING_ISSUE}."
+
+      # Posts an Adaptive Card to a Microsoft Teams channel, mirroring the existing
+      # notify_teams.py pattern (urllib POST of an Adaptive Card to an incoming webhook).
+      # The destination channel is whichever channel owns the webhook stored in the
+      # NPU_CIP_TEAMS_WEBHOOK_URL secret. Skips cleanly when the secret is unset.
+      - name: Send Teams notification
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.NPU_CIP_TEAMS_WEBHOOK_URL }}
+          CARD_DATE: ${{ steps.detect.outputs.date }}
+          CARD_BRANCH: ${{ steps.detect.outputs.branch }}
+          CARD_COMMIT_URL: ${{ steps.detect.outputs.commit_url }}
+          CARD_AUTHOR: ${{ steps.detect.outputs.author }}
+          CARD_PR_INFO: ${{ steps.detect.outputs.pr_info }}
+          CARD_CHANGES: ${{ steps.detect.outputs.changes }}
+          CARD_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TEAMS_WEBHOOK_URL}" ]]; then
+            echo "::warning::NPU_CIP_TEAMS_WEBHOOK_URL not set; skipping Teams notification."
+            exit 0
+          fi
+          python3 .github/scripts/npu_cip_notify_teams.py
+
