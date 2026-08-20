@@ -44,6 +44,17 @@ def main() -> None:
          "wrap": True, "spacing": "Medium", "fontType": "Monospace"},
     ]
 
+    # Teams @mentions require both <at> tags in the text and a matching msteams.entities
+    # list; CARD_MENTION_UPNS holds comma/space separated user principal names (emails).
+    raw_mentions = os.environ.get("CARD_MENTION_UPNS", "").replace(",", " ").split()
+    entities = []
+    for upn in raw_mentions:
+        entities.append({"type": "mention", "text": f"<at>{upn}</at>",
+                         "mentioned": {"id": upn, "name": upn}})
+    if entities:
+        body.append({"type": "TextBlock", "spacing": "Medium", "wrap": True,
+                     "text": " ".join(entity["text"] for entity in entities)})
+
     commit_url = os.environ.get("CARD_COMMIT_URL", "")
     actions = [{"type": "Action.OpenUrl", "title": "View commit", "url": commit_url}] if commit_url else []
 
@@ -57,6 +68,8 @@ def main() -> None:
         "body": body,
         "actions": actions,
     }
+    if entities:
+        payload["msteams"] = {"entities": entities}
 
     request = urllib.request.Request(
         webhook_url,

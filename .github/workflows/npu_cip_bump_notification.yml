@@ -238,6 +238,7 @@ jobs:
           CARD_PR_INFO: ${{ steps.detect.outputs.pr_info }}
           CARD_CHANGES: ${{ steps.detect.outputs.changes }}
           CARD_REPO: ${{ github.repository }}
+          CARD_MENTION_UPNS: ${{ vars.NPU_CIP_TEAMS_MENTION_UPNS }}
         run: |
           set -euo pipefail
           if [[ -z "${TEAMS_WEBHOOK_URL}" ]]; then
