@@ -213,6 +213,16 @@ jobs:
           gh issue comment "${TRACKING_ISSUE}" --repo "${GITHUB_REPOSITORY}" --body-file body.md
           echo "Posted NPU CiP bump notification to issue #${TRACKING_ISSUE}."
 
+      # Sparse checkout of just the scripts directory; the repository is far too large
+      # to check out in full for a notification job.
+      - name: Check out notification script
+        if: steps.detect.outputs.changed == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
       # Posts an Adaptive Card to a Microsoft Teams channel, mirroring the existing
       # notify_teams.py pattern (urllib POST of an Adaptive Card to an incoming webhook).
       # The destination channel is whichever channel owns the webhook stored in the
