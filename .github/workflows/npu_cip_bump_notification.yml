@@ -66,6 +66,7 @@ jobs:
         PLUGIN_COMPILER_WINDOWS_2022_CHECKSUM
         PLUGIN_COMPILER_UBUNTU_22_04_CHECKSUM
         PLUGIN_COMPILER_UBUNTU_24_04_CHECKSUM
+        PLUGIN_COMPILER_UBUNTU_26_04_CHECKSUM
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Detect CiP value-level change
