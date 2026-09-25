@@ -111,6 +111,7 @@ jobs:
           else
             PR="${PR_NUMBER}"
           fi
+          PR="${{ steps.detect.outputs.pr_number }}"
           if [[ -z "${PR}" ]]; then
             echo "::warning::No pull request linked to this bump; cannot post @mention comment."
             exit 0
