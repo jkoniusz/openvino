@@ -196,7 +196,7 @@ def post_adaptive_card(webhook_url: str, body: list[dict[str, Any]]) -> None:
         ],
     }
     if urllib.parse.urlsplit(webhook_url).scheme != "https":
-        sys.exit(f"Teams webhook URL must use https, got: '{webhook_url}'")
+        sys.exit("Teams webhook URL must use the https scheme.")
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode("utf-8"),
